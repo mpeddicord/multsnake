@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Multisnake</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Chakra+Petch:wght@400;600&display=swap">
+<style>
+:root{--bg:#0a0d16;--panel:#121729;--line:#1f2740;--ink:#e6edf7;--dim:#8a95b0;--acc:#7CFF4A;--food:#FF3B5C}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 "Chakra Petch",ui-monospace,monospace;-webkit-tap-highlight-color:transparent}
+body{min-height:100dvh;display:flex;flex-direction:column;align-items:center;padding:16px;gap:12px;touch-action:none}
+h1{font:700 clamp(22px,6vw,40px)/1 Silkscreen,monospace;margin:0;color:var(--acc);text-shadow:0 0 18px #7cff4a66;letter-spacing:.04em}
+#lobby{display:flex;flex-direction:column;gap:12px;width:min(100%,360px);background:var(--panel);border:1px solid var(--line);padding:20px}
+input{width:100%;padding:10px;font:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--line);text-transform:uppercase}
+input#name{text-transform:none}
+input:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+button{font:600 15px "Chakra Petch",monospace;padding:10px 14px;background:var(--acc);color:#04120a;border:0;cursor:pointer;text-transform:uppercase;letter-spacing:.06em}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+.row{display:flex;gap:8px}
+.or{color:var(--dim);text-align:center;font-size:13px;letter-spacing:.2em}
+#game{display:none;flex-direction:column;align-items:center;gap:10px;width:100%}
+#hud{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 20px;width:min(100%,640px);font-size:14px}
+#hud .code{color:var(--dim)}#hud .code b{color:var(--ink);font-family:Silkscreen,monospace;letter-spacing:.15em;margin-left:6px}
+#board{display:flex;flex-wrap:wrap;gap:6px 16px;width:min(100%,640px);font-variant-numeric:tabular-nums;font-size:14px}
+#board span::before{content:"";display:inline-block;width:10px;height:10px;background:var(--c);margin-right:6px;box-shadow:0 0 6px var(--c)}
+#board .dead{color:var(--dim);text-decoration:line-through}
+canvas{width:min(100%,640px);height:auto;background:#0d1120;border:1px solid var(--line);box-shadow:0 0 40px #0006}
+#msg{min-height:1.4em;color:var(--dim);font-size:13px;text-align:center}
+.err{color:var(--food)}
+small{color:var(--dim);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<h1>MULTISNAKE</h1>
+<div id="lobby">
+  <input id="name" placeholder="Your name" maxlength="12" autocomplete="nickname">
+  <button id="hostBtn">Host a game</button>
+  <div class="or">— or —</div>
+  <div class="row"><input id="codeIn" placeholder="ROOM CODE" maxlength="4"><button id="joinBtn" class="ghost">Join</button></div>
+  <small>Arrows / WASD, or swipe. Walls and snakes kill. Eat to grow.</small>
+</div>
+<div id="game">
+  <div id="hud"><span class="code">ROOM<b id="code"></b></span><button id="copy" class="ghost" style="padding:4px 10px;font-size:12px">Copy invite link</button></div>
+  <canvas id="cv" width="640" height="480"></canvas>
+  <div id="board"></div>
+</div>
+<div id="msg"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<script src="sim.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const TICK = 110, CELL = 16, PREFIX = 'multisnake-v1-';
+let peer, conn, conns = {}, game, me, isHost = false, name = '';
+const say = (t, err) => { $('msg').textContent = t; $('msg').className = err ? 'err' : ''; };
+
+const params = new URLSearchParams(location.search);
+if (params.get('room')) $('codeIn').value = params.get('room');
+try { $('name').value = localStorage.getItem('snakeName') || ''; } catch (e) {}
+
+function getName() {
+  name = $('name').value.trim() || 'anon';
+  try { localStorage.setItem('snakeName', name); } catch (e) {}
+  return name;
+}
+
+function showGame(code) {
+  $('lobby').style.display = 'none'; $('game').style.display = 'flex';
+  $('code').textContent = code;
+  history.replaceState(null, '', '?room=' + code);
+  say(isHost ? 'Share the code. Friends join any time.' : 'Connected.');
+}
+
+function host() {
+  getName();
+  const code = Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random() * 24)]).join('');
+  say('Creating room…');
+  peer = new Peer(PREFIX + code);
+  peer.on('open', () => {
+    isHost = true; me = 'host';
+    game = newGame(); spawn(game, me, name);
+    showGame(code);
+    // ponytail: host broadcasts full state every tick; send deltas if many players or long snakes lag
+    setInterval(() => {
+      step(game);
+      const s = JSON.stringify(game);
+      for (const id in conns) conns[id].send(s);
+      render();
+    }, TICK);
+  });
+  peer.on('connection', c => {
+    c.on('data', d => {
+      if (d.name !== undefined) { conns[c.peer] = c; spawn(game, c.peer, d.name); }
+      if (d.dir && game.snakes[c.peer]) turn(game.snakes[c.peer], d.dir);
+    });
+    c.on('close', () => { delete conns[c.peer]; delete game.snakes[c.peer]; });
+  });
+  peer.on('error', e => say(e.type === 'unavailable-id' ? 'Code taken, try again' : 'Error: ' + e.type, true));
+}
+
+function join() {
+  getName();
+  const code = $('codeIn').value.trim().toUpperCase();
+  if (code.length !== 4) return say('Enter a 4-letter room code', true);
+  say('Connecting…');
+  peer = new Peer();
+  peer.on('open', () => {
+    conn = peer.connect(PREFIX + code, { serialization: 'json' });
+    conn.on('open', () => { me = peer.id; conn.send({ name: name }); showGame(code); });
+    conn.on('data', s => { game = JSON.parse(s); render(); });
+    conn.on('close', () => say('Host left the game', true));
+  });
+  peer.on('error', e => say(e.type === 'peer-unavailable' ? 'No game with that code' : 'Error: ' + e.type, true));
+}
+
+function sendDir(d) {
+  if (!game) return;
+  if (isHost) turn(game.snakes[me], d); else if (conn && conn.open) conn.send({ dir: d });
+}
+
+const KEYS = { ArrowUp: [0, -1], KeyW: [0, -1], ArrowDown: [0, 1], KeyS: [0, 1], ArrowLeft: [-1, 0], KeyA: [-1, 0], ArrowRight: [1, 0], KeyD: [1, 0] };
+addEventListener('keydown', e => { const d = KEYS[e.code]; if (d && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); sendDir(d); } });
+let t0 = null;
+addEventListener('touchstart', e => { t0 = e.touches[0]; }, { passive: true });
+addEventListener('touchend', e => {
+  if (!t0) return;
+  const dx = e.changedTouches[0].clientX - t0.clientX, dy = e.changedTouches[0].clientY - t0.clientY;
+  if (Math.abs(dx) + Math.abs(dy) < 20) return;
+  sendDir(Math.abs(dx) > Math.abs(dy) ? [Math.sign(dx), 0] : [0, Math.sign(dy)]);
+});
+
+const ctx = $('cv').getContext('2d');
+const esc = t => t.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function render() {
+  ctx.fillStyle = '#0d1120'; ctx.fillRect(0, 0, W * CELL, H * CELL);
+  ctx.strokeStyle = '#151b2e'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = 0; x <= W; x++) { ctx.moveTo(x * CELL + .5, 0); ctx.lineTo(x * CELL + .5, H * CELL); }
+  for (let y = 0; y <= H; y++) { ctx.moveTo(0, y * CELL + .5); ctx.lineTo(W * CELL, y * CELL + .5); }
+  ctx.stroke();
+  ctx.fillStyle = '#FF3B5C'; ctx.shadowColor = '#FF3B5C'; ctx.shadowBlur = 10;
+  for (const [x, y] of game.food) { ctx.beginPath(); ctx.arc(x * CELL + 8, y * CELL + 8, 5, 0, 7); ctx.fill(); }
+  const rows = [];
+  for (const id in game.snakes) {
+    const s = game.snakes[id];
+    rows.push(s);
+    ctx.fillStyle = s.color; ctx.shadowColor = s.color; ctx.shadowBlur = id === me ? 12 : 0;
+    for (const [x, y] of s.body) ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+    if (s.alive) {
+      const [x, y] = s.body[0], [dx, dy] = s.dir;
+      const cx = x * CELL + 8 + dx * 3, cy = y * CELL + 8 + dy * 3;
+      ctx.shadowBlur = 0; ctx.fillStyle = '#0a0d16';
+      ctx.fillRect(cx - 3 * Math.abs(dy) - 1, cy - 3 * Math.abs(dx) - 1, 2, 2);
+      ctx.fillRect(cx + 3 * Math.abs(dy) - 1, cy + 3 * Math.abs(dx) - 1, 2, 2);
+    }
+  }
+  ctx.shadowBlur = 0;
+  rows.sort((a, b) => b.score - a.score);
+  $('board').innerHTML = rows.map(s =>
+    '<span class="' + (s.alive ? '' : 'dead') + '" style="--c:' + s.color + '">' + esc(s.name) +
+    (s === game.snakes[me] ? ' (you)' : '') + ' ' + s.score + '<small> best ' + s.best + '</small></span>').join('');
+}
+
+$('hostBtn').onclick = host;
+$('joinBtn').onclick = join;
+$('codeIn').onkeydown = e => { if (e.key === 'Enter') join(); };
+$('copy').onclick = () => navigator.clipboard.writeText(location.href).then(() => say('Invite link copied'));
+</script>
+</body>
+</html>
