@@ -20,3 +20,16 @@ b.body = [[12, 10], [13, 10], [14, 10]]; b.dir = b.next = [-1, 0];
 step(g);
 assert(!a.alive && !b.alive, 'head-on kills both');
 console.log('ok');
+
+// autopilot survives alone for a long game and keeps eating
+{
+  const { think } = require('./sim.js');
+  const g2 = newGame(); const bot = spawn(g2, 'bot', 'Bot');
+  for (let i = 0; i < 2000; i++) {
+    const d = think(g2, 'bot'); if (d) turn(bot, d);
+    step(g2);
+    assert(bot.alive, 'autopilot died at tick ' + i + ' score ' + bot.score);
+  }
+  assert(bot.score > 40, 'autopilot ate ' + bot.score);
+  console.log('autopilot score', bot.score, 'length', bot.body.length);
+}
